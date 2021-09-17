@@ -17,6 +17,9 @@ import (
 	"github.com/tinkerbell/boots/httplog"
 	tinkClient "github.com/tinkerbell/tink/client"
 	tw "github.com/tinkerbell/tink/protos/workflow"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/tinkerbell/boots/pkg/controllers"
 )
 
 type hardwareGetter interface {
@@ -24,15 +27,15 @@ type hardwareGetter interface {
 
 type Client interface {
 	GetWorkflowsFromTink(context.Context, HardwareID) (*tw.WorkflowContextList, error)
-	DiscoverHardwareFromDHCP(ctx context.Context, mac net.HardwareAddr, giaddr net.IP, circuitID string) (Discovery, error)
 	ReportDiscovery(ctx context.Context, mac net.HardwareAddr, giaddr net.IP, circuitID string) (Discovery, error)
 
+	DiscoverHardwareFromDHCP(ctx context.Context, mac net.HardwareAddr, giaddr net.IP, circuitID string) (Discovery, error)
 	DiscoverHardwareFromIP(ctx context.Context, ip net.IP) (Discovery, error)
-	PostHardwareComponent(ctx context.Context, hardwareID HardwareID, body io.Reader) (*ComponentsResponse, error)
-	PostHardwareEvent(ctx context.Context, id string, body io.Reader) (string, error)
 	PostHardwarePhoneHome(ctx context.Context, id string) error
+	PostHardwareEvent(ctx context.Context, id string, body io.Reader) (string, error)
 	PostHardwareFail(ctx context.Context, id string, body io.Reader) error
 	PostHardwareProblem(ctx context.Context, id HardwareID, body io.Reader) (string, error)
+	PostHardwareComponent(ctx context.Context, hardwareID HardwareID, body io.Reader) (*ComponentsResponse, error)
 
 	GetInstanceIDFromIP(ctx context.Context, dip net.IP) (string, error)
 	PostInstancePhoneHome(context.Context, string) error
@@ -52,9 +55,10 @@ type client struct {
 	authToken      string
 	hardwareClient hardwareGetter
 	workflowClient tw.WorkflowServiceClient
+	manager        controllers.Manager
 }
 
-func NewClient(consumerToken, authToken string, baseURL *url.URL) (Client, error) {
+func NewClient(kubeconfig, k8sAPI, consumerToken, authToken string, baseURL *url.URL) (Client, error) {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("unexpected type for http.DefaultTransport")
@@ -72,6 +76,7 @@ func NewClient(consumerToken, authToken string, baseURL *url.URL) (Client, error
 
 	var hg hardwareGetter
 	var wg tw.WorkflowServiceClient
+	var manager controllers.Manager
 	var err error
 	dataModelVersion := os.Getenv("DATA_MODEL_VERSION")
 	switch dataModelVersion {
@@ -125,6 +130,13 @@ func NewClient(consumerToken, authToken string, baseURL *url.URL) (Client, error
 			filename: saFile,
 			db:       dsDb,
 		}
+	case "kubernetes":
+		config, err := clientcmd.BuildConfigFromFlags(k8sAPI, kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+		manager = controllers.NewHardwareManagerOrDie(config, controllers.GetServerOptions())
+		go manager.Start(context.Background())
 	default:
 		return nil, errors.Errorf("invalid DATA_MODEL_VERSION: %q", dataModelVersion)
 	}
@@ -136,6 +148,7 @@ func NewClient(consumerToken, authToken string, baseURL *url.URL) (Client, error
 		authToken:      authToken,
 		hardwareClient: hg,
 		workflowClient: wg,
+		manager:        manager,
 	}, nil
 }
 

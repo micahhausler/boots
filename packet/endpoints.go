@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
 
 	"github.com/packethost/cacher/protos/cacher"
+	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	tpkg "github.com/tinkerbell/tink/pkg"
 	tink "github.com/tinkerbell/tink/protos/hardware"
 	tw "github.com/tinkerbell/tink/protos/workflow"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tinkerbell/boots/k8s/api/v1alpha1"
 	"github.com/tinkerbell/boots/metrics"
+	"github.com/tinkerbell/boots/pkg/controllers"
 )
 
 const mimeJSON = "application/json"
@@ -45,7 +49,12 @@ func (c *client) GetWorkflowsFromTink(ctx context.Context, hwID HardwareID) (res
 	metrics.CacherRequestsInProgress.With(labels).Inc()
 	metrics.CacherTotal.With(labels).Inc()
 
-	result, err = c.workflowClient.GetWorkflowContextList(ctx, &tw.WorkflowContextRequest{WorkerId: hwID.String()})
+	switch os.Getenv("DATA_MODEL_VERSION") {
+	case "kubernetes":
+		result, err = c.GetWorkflowContextList(ctx, hwID.String())
+	default:
+		result, err = c.workflowClient.GetWorkflowContextList(ctx, &tw.WorkflowContextRequest{WorkerId: hwID.String()})
+	}
 
 	cacherTimer.ObserveDuration()
 	metrics.CacherRequestsInProgress.With(labels).Dec()
@@ -120,6 +129,18 @@ func (c *client) DiscoverHardwareFromDHCP(ctx context.Context, mac net.HardwareA
 		}
 
 		return nil, errors.New("not found")
+	case "kubernetes":
+		hardwareList := &v1alpha1.HardwareList{}
+		err := c.manager.GetClient().List(ctx, hardwareList, &crclient.MatchingFields{
+			controllers.HardwareMacAddrKey: mac.String(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(hardwareList.Items) == 0 {
+			return nil, fmt.Errorf("no hardware found")
+		}
+		return NewK8sDiscovery(&hardwareList.Items[0]), nil
 	case "standalone":
 		sc := c.hardwareClient.(StandaloneClient)
 		for _, v := range sc.db {
@@ -223,6 +244,18 @@ func (c *client) DiscoverHardwareFromIP(ctx context.Context, ip net.IP) (Discove
 		if err != nil {
 			return nil, errors.New("marshalling tink hardware")
 		}
+	case "kubernetes":
+		hardwareList := &v1alpha1.HardwareList{}
+		err := c.manager.GetClient().List(ctx, hardwareList, &crclient.MatchingFields{
+			controllers.HardwareIPAddrKey: ip.String(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(hardwareList.Items) == 0 {
+			return nil, fmt.Errorf("no hardware found")
+		}
+		return NewK8sDiscovery(&hardwareList.Items[0]), nil
 	case "standalone":
 		sc := c.hardwareClient.(StandaloneClient)
 		for _, v := range sc.db {
